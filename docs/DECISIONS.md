@@ -808,3 +808,8 @@ autoridade (`docs/adr/` > `docs/SRS-v2.0-*.md` > `docs/websocket.md` >
   passa a carregar texto: o `HRESULT` do Media Foundation, `EC_DEVICE_LOST` ou `EC_ERRORABORT` com
   o formato negociado no DirectShow, ou o motivo da conexão ter caído. São subsistemas diferentes,
   e a mesma frase para todos não deixa ninguém distinguir qual falhou.
+
+- **[S10] A versão do app mora só no `desktop/package.json`.** O `tauri.conf.json` aponta para ele
+  (`"version": "../package.json"`) e é dele que saem o `.msi` e o `latest.json`; o `version` do
+  `Cargo.toml` do core ficou em `0.0.0` porque nada o lê. Para subir a
+  versão: `npm version X.Y.Z --no-git-tag-version` em `desktop/`, que atualiza o lockfile junto.
