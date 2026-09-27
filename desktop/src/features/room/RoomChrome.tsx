@@ -332,30 +332,29 @@ function People() {
               }
               const live = publicationsOf(participant);
               return (
-                <li key={id} className="px-2 py-1">
-                  <div className="flex items-center gap-2">
-                    <Avatar
-                      url={participant.user.avatar_url}
-                      name={participant.user.username}
-                      size={20}
-                    />
-                    <span className="min-w-0 flex-1 truncate text-text">
-                      {nameOf(participants, id)}
-                      {id === me && <span className="text-text-faint"> · você</span>}
+                <li key={id} className="flex items-center gap-2 px-2 py-1">
+                  <Avatar
+                    url={participant.user.avatar_url}
+                    name={participant.user.username}
+                    size={20}
+                  />
+                  <span className="min-w-0 flex-1 truncate text-text">
+                    {nameOf(participants, id)}
+                    {id === me && <span className="text-text-faint"> · você</span>}
+                  </span>
+                  {live.length > 0 && publicationsWithTrack(live, id, publications) === 0 && (
+                    // Transmitindo, mas a trilha ainda não chegou: não há do
+                    // que sair, e um botão ali prometeria uma ação que não
+                    // acontece.
+                    <span className="flex shrink-0 items-center gap-1 text-danger">
+                      <Icon name="dot" size={10} />
+                      no ar
                     </span>
-                    {live.length > 0 && publicationsWithTrack(live, id, publications) === 0 && (
-                      // Transmitindo, mas a trilha ainda não chegou: não há do
-                      // que sair, e um botão ali prometeria uma ação que não
-                      // acontece.
-                      <span className="flex shrink-0 items-center gap-1 text-danger">
-                        <Icon name="dot" size={10} />
-                        no ar
-                      </span>
-                    )}
-                  </div>
+                  )}
 
-                  {/* Uma linha por publicação (ADR-0038). Botão com texto, e
-                      não com dica: a dica de um botão de ícone é um bloco
+                  {/* Uma pílula por publicação, na linha do nome (ADR-0038):
+                      o ícone diz a fonte, o texto diz o gesto. Botão com texto,
+                      e não com dica: a dica de um botão de ícone é um bloco
                       posicionado, e dentro desta lista, que rola, ela empurrava
                       a largura do menu e ganhava uma barra de rolagem
                       horizontal — foi assim que o menu apareceu torto. */}
@@ -366,17 +365,14 @@ function People() {
                       return null;
                     }
                     return (
-                      <div key={key} className="mt-0.5 flex items-center gap-2 pl-7">
-                        <span className="min-w-0 flex-1 truncate text-text-muted">
-                          {sourceLabel(publication.source)}
-                        </span>
-                        <WatchButton
-                          watching={state.subscribed}
-                          onClick={() => {
-                            media.setPublicationSubscribed(key, !state.subscribed);
-                          }}
-                        />
-                      </div>
+                      <WatchButton
+                        key={key}
+                        source={publication.source}
+                        watching={state.subscribed}
+                        onClick={() => {
+                          media.setPublicationSubscribed(key, !state.subscribed);
+                        }}
+                      />
                     );
                   })}
                 </li>

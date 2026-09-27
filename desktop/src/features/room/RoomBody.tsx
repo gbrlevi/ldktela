@@ -1,7 +1,7 @@
 import { media } from '../../app/runtime';
 import { type MediaFault, useMediaStore } from '../../store/media';
 import { publicationsOf, useRoomStore } from '../../store/room';
-import { publicationId, sourceLabel } from '../../media/publication';
+import { publicationId } from '../../media/publication';
 import { useSessionStore } from '../../store/session';
 import { useUiStore } from '../../store/ui';
 import { Avatar } from '../../ui/Avatar';
@@ -76,54 +76,50 @@ function InRoom({ onShare, onStop }: RoomBodyProps) {
           }
           const live = publicationsOf(participant);
           return (
-            <li key={id} className="space-y-1">
-              <div className="flex items-center gap-2">
-                <Avatar url={participant.user.avatar_url} name={participant.user.username} />
-                <span className="min-w-0 truncate text-text">
-                  {participant.user.display_name ?? participant.user.username}
+            <li key={id} className="flex items-center gap-2">
+              <Avatar url={participant.user.avatar_url} name={participant.user.username} />
+              <span className="min-w-0 truncate text-text">
+                {participant.user.display_name ?? participant.user.username}
+              </span>
+              {live.length > 0 && (
+                // A etiqueta acompanha o nome, e não o botão: ela diz o que a
+                // pessoa está fazendo, e o botão é o que se pode fazer com isso.
+                // Lado a lado à direita, as duas coisas competiam.
+                <span className="flex shrink-0 items-center gap-1 rounded-pill bg-danger-soft px-1.5 py-px text-[0.6875rem] font-semibold tracking-wide text-danger">
+                  <Icon name="dot" size={8} />
+                  AO VIVO
                 </span>
-                {live.length > 0 && (
-                  // A etiqueta acompanha o nome, e não o botão: ela diz o que a
-                  // pessoa está fazendo, e o botão é o que se pode fazer com isso.
-                  // Lado a lado à direita, as duas coisas competiam.
-                  <span className="flex shrink-0 items-center gap-1 rounded-pill bg-danger-soft px-1.5 py-px text-[0.6875rem] font-semibold tracking-wide text-danger">
-                    <Icon name="dot" size={8} />
-                    AO VIVO
-                  </span>
-                )}
-              </div>
+              )}
 
-              {/* Uma linha por publicação (ADR-0038): quem transmite tela e
-                  câmera pode ser assistido nas duas em separado, e um botão só
-                  teria de escolher uma por conta própria.
+              {/* Uma pílula por publicação, na linha do nome (ADR-0038): quem
+                  transmite tela e câmera pode ser assistido nas duas em
+                  separado, e um botão só teria de escolher uma por conta
+                  própria. O ícone diz a fonte, o texto diz o gesto.
 
                   Saindo de todas, a sala volta a esta lista — que passa a ser o
                   único caminho de volta (ADR-0036). Só aparece onde há trilha a
                   que se possa entrar: quem transmite mas cuja trilha ainda não
                   chegou não tem o que oferecer. */}
-              {live.map((publication) => {
-                const key = publicationId(id, publication.source);
-                const state = publications[key];
-                if (state === undefined) {
-                  return null;
-                }
-                return (
-                  <div key={key} className="flex items-center gap-2 pl-8">
-                    <span className="min-w-0 truncate text-sm text-text-muted">
-                      {sourceLabel(publication.source)}
-                    </span>
-                    <span className="ml-auto">
-                      <WatchButton
-                        size="md"
-                        watching={state.subscribed}
-                        onClick={() => {
-                          media.setPublicationSubscribed(key, !state.subscribed);
-                        }}
-                      />
-                    </span>
-                  </div>
-                );
-              })}
+              <span className="ml-auto flex shrink-0 items-center gap-1.5">
+                {live.map((publication) => {
+                  const key = publicationId(id, publication.source);
+                  const state = publications[key];
+                  if (state === undefined) {
+                    return null;
+                  }
+                  return (
+                    <WatchButton
+                      key={key}
+                      size="md"
+                      source={publication.source}
+                      watching={state.subscribed}
+                      onClick={() => {
+                        media.setPublicationSubscribed(key, !state.subscribed);
+                      }}
+                    />
+                  );
+                })}
+              </span>
             </li>
           );
         })}

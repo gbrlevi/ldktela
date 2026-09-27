@@ -109,8 +109,24 @@ describe('o caminho de volta para uma tela que se deixou de assistir (issue #7)'
     chrome();
     fireEvent.click(screen.getByRole('button', { name: /Quem está aqui/ }));
 
-    fireEvent.click(screen.getByRole('button', { name: 'Entrar' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Entrar na tela' }));
     expect(setPublicationSubscribed).toHaveBeenCalledWith('1:screen', true);
+  });
+
+  it('fica na linha do nome, um por publicação, dizendo de qual fonte é', () => {
+    // Uma sub-linha por fonte deixava quem transmite só a tela com uma linha a
+    // mais que os outros, só para dizer "Tela" ao lado do botão.
+    room([participant('1', 'ana', 'screen', 'camera')]);
+    useMediaStore.getState().addTrack('1:screen', 'video');
+    useMediaStore.getState().addTrack('1:camera', 'video');
+    useMediaStore.getState().setSubscribed('1:camera', false);
+    chrome();
+    fireEvent.click(screen.getByRole('button', { name: /Quem está aqui/ }));
+
+    const row = within(screen.getByText('ana').closest('li') as HTMLElement);
+    expect(row.getByRole('button', { name: 'Sair da tela' })).toBeDefined();
+    fireEvent.click(row.getByRole('button', { name: 'Entrar na câmera' }));
+    expect(setPublicationSubscribed).toHaveBeenCalledWith('1:camera', true);
   });
 
   it('conta no cabeçalho quantas telas ficaram de fora', () => {
