@@ -427,8 +427,15 @@ impl Publisher {
     }
 
     /// Publishes the camera (ADR-0038). Nunca carrega audio: a voz e do Discord.
-    pub async fn publish_camera(&self) -> Result<NativeVideoSource, PublishError> {
-        let video = NativeVideoSource::new(
+    /// The source a camera's frames go into, made before anything is published.
+    ///
+    /// Separate from `publish_camera` so the camera can be opened — and its
+    /// format negotiated — before the track exists. A camera that cannot
+    /// deliver then fails without the room ever seeing it, instead of showing
+    /// everyone a black tile and a chime for a publication that dies a second
+    /// later.
+    pub fn camera_source() -> NativeVideoSource {
+        NativeVideoSource::new(
             VideoResolution {
                 width: CAMERA_SIZE.width,
                 height: CAMERA_SIZE.height,
@@ -437,7 +444,11 @@ impl Publisher {
             // encoder sao as certas — movimento continuo, ruido de sensor, e
             // nada de texto parado para preservar.
             false,
-        );
+        )
+    }
+
+    /// Publishes `video` as the camera track. The capture is already feeding it.
+    pub async fn publish_camera(&self, video: NativeVideoSource) -> Result<(), PublishError> {
         let track =
             LocalVideoTrack::create_video_track("camera", RtcVideoSource::Native(video.clone()));
 
@@ -469,7 +480,7 @@ impl Publisher {
         if let Ok(mut held) = self.camera.lock() {
             held.video = Some(publication.sid());
         }
-        Ok(video)
+        Ok(())
     }
 
     /// Takes one source off the air, leaving the other one running.

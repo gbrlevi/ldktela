@@ -475,39 +475,60 @@ pub async fn camera_start(
 
         let publisher = connect(&mut live, &app, &request.url, &request.token).await?;
 
-        let sink = match publisher.publish_camera().await {
-            Ok(sink) => sink,
-            Err(error) => {
-                live.close_if_idle().await;
-                return Err(error.into());
-            }
-        };
+        // A camera abre, e o formato e negociado, **antes** de a trilha existir.
+        // Na ordem inversa, uma camera que nao entrega quadro aparecia para a
+        // sala inteira — ladrilho preto, sino de "tela comecou" — e morria um
+        // segundo depois com "a camera foi encerrada". Assim ela falha aqui,
+        // como erro no botao, e ninguem mais fica sabendo.
+        let video = Publisher::camera_source();
 
-        // O preview so nasce depois de publicar, e nunca antes: `Preview::stop`
-        // espera a thread de codificacao terminar, e ela so termina quando o
-        // ultimo `Tap` e descartado. Criado antes, um caminho de erro que ainda
-        // segurasse o `Tap` travaria o processo aqui dentro.
+        // Todo caminho de erro abaixo larga o `Tap` antes de parar o preview:
+        // `camera::start` o descarta quando recusa, e `capture.stop()` quando a
+        // publicacao falha. `Preview::stop` espera justamente por isso.
         let (preview, tap) = preview::start(app.clone(), Source::Camera);
         let preview_control = preview.control();
         preview_control.set(true, GRID_FPS, false);
 
+        // Fora do runtime: abrir inicializa COM, enumera dispositivos e pode
+        // tentar os dois caminhos do Windows, o que leva centenas de
+        // milissegundos numa thread que nao deveria esperar por nada.
         let lost = app.clone();
-        let capture = match crate::camera::start(
-            &request.device_id,
-            crate::publisher::CAMERA_SIZE,
-            crate::publisher::CAMERA_FPS,
-            sink,
-            Some(tap),
-            move |reason| give_up(&lost, Source::Camera, reason),
-        ) {
-            Ok(capture) => capture,
-            Err(error) => {
+        let device = request.device_id.clone();
+        let feed = video.clone();
+        let opened = tauri::async_runtime::spawn_blocking(move || {
+            crate::camera::start(
+                &device,
+                crate::publisher::CAMERA_SIZE,
+                crate::publisher::CAMERA_FPS,
+                feed,
+                Some(tap),
+                move |reason| give_up(&lost, Source::Camera, reason),
+            )
+        })
+        .await;
+        let capture = match opened {
+            Ok(Ok(capture)) => capture,
+            Ok(Err(error)) => {
                 preview.stop();
-                publisher.unpublish(Source::Camera).await;
                 live.close_if_idle().await;
                 return Err(error.into());
             }
+            Err(_) => {
+                preview.stop();
+                live.close_if_idle().await;
+                return Err(crate::camera::CameraError::Platform(
+                    "a abertura da camera terminou sem resposta".into(),
+                )
+                .into());
+            }
         };
+
+        if let Err(error) = publisher.publish_camera(video).await {
+            capture.stop();
+            preview.stop();
+            live.close_if_idle().await;
+            return Err(error.into());
+        }
 
         live.camera = Some(CameraActive {
             capture,
