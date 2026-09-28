@@ -265,7 +265,8 @@ transmitir tela e câmera ao mesmo tempo produz dois ladrilhos independentes, qu
 se pode focar, destacar e abandonar em separado; parar uma não para a outra;
 câmera ocupada por outro aplicativo dá mensagem que diz isso e não impede
 compartilhar a tela; **uma câmera virtual — DroidCam, OBS — aparece uma vez só na
-lista e transmite**, igual às físicas; o teto de câmeras por sala recusa a próxima
+lista e transmite**, igual às físicas; **uma câmera que não entrega quadro falha no
+botão, com o motivo, e a sala nunca a vê**; o teto de câmeras por sala recusa a próxima
 com erro claro;
 quem assiste com a câmera escondida não baixa os quadros dela (RF-32); reconectar
 depois de uma queda restaura as duas publicações com o tempo no ar certo.

@@ -1,6 +1,6 @@
 # ADR-0039 — A câmera tem dois caminhos de captura: Media Foundation e DirectShow
 
-- **Status:** Aceito
+- **Status:** Aceito; emendado em 2026-09-27 (ver o fim)
 - **Data:** 2026-09-23
 - **Altera:** a decisão 8 do [ADR-0038](0038-camera-e-uma-segunda-publicacao.md), que dizia
   "a captura é nossa, em Media Foundation". Continua sendo nossa; deixa de ser só em Media
@@ -134,3 +134,77 @@ Discord faz.
   enumeração sozinho, e é tentador. Contraria o [ADR-0026](0026-publicacao-no-rust-nativo.md)
   — nada no WebView adquire mídia —, e passar vídeo cru por IPC a 30 fps é justamente o
   custo que aquele ADR existe para não pagar.
+
+## Emenda de 2026-09-27 — o Media Foundation também negocia o formato nativo
+
+### O que aconteceu
+
+Um usuário relatou, já com o motivo no aviso: *"o Windows recusou a camera: pedindo NV12 a camera:
+Nenhuma transformação adequada foi encontrada (0xC00D5212)"*. É `MF_E_TOPO_CODEC_NOT_FOUND`, e o
+defeito era a premissa da decisão 7. O caminho Media Foundation pedia NV12 ao leitor e confiava em
+`MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING` para produzi-lo. A documentação desse atributo diz o
+contrário: ele faz **YUV → RGB-32 e desentrelaçamento, e nada mais**. Nunca produziu NV12 de coisa
+alguma. Funcionava só em câmera que já emite NV12, como a integrada de notebook — por isso o
+recurso passou nos primeiros testes e falhou nas câmeras dos usuários.
+
+A sequência explicava também o relato anterior dos usuários de DroidCam: a câmera **abria** pelo
+Media Foundation, então o DirectShow nunca era tentado; a trilha era publicada; e só então, já na
+thread de captura, a negociação falhava — ladrilho preto para a sala e "a câmera foi encerrada"
+para quem transmitia.
+
+O defeito foi reproduzido nesta máquina, com a mesma mensagem e o mesmo `HRESULT`, passando o
+código antigo por um leitor aberto sobre arquivos AVI em RGB24 e em YUY2. O leitor de fonte é o
+mesmo para câmera e para arquivo, e é nele que a negociação acontece.
+
+### Decisão
+
+1. **O Media Foundation escolhe um formato nativo da câmera e o fixa no dispositivo.** Pedir só a
+   saída deixava o leitor escolher a entrada sozinho. A ordem é a mesma regra de tamanho e taxa
+   do DirectShow, com os formatos sem compressão na frente dos comprimidos e, entre eles, o mais
+   barato de converter. Se o melhor tamanho só existe comprimido, o melhor formato sem compressão
+   fica de reserva, logo atrás.
+
+2. **A conversão é nossa nos dois caminhos.** NV12, I420, YUY2, UYVY, RGB32 e RGB24 chegam como a
+   câmera os emite e passam por `convert.rs`, que agora recebe o passo de linha e a orientação
+   explicitamente, porque o Media Foundation entrega o passo que o driver alocou e diz a
+   orientação pelo sinal dele. Isto altera a decisão 7: o Windows só **decodifica**.
+
+3. **Formato comprimido passa por um decodificador, pedido pelo que sabemos ler.** Para MJPEG e
+   H.264, pedimos ao leitor NV12, YUY2, I420 ou RGB32, nessa ordem, no tamanho e na taxa do
+   formato nativo. O leitor é criado com `MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING`, que
+   insere um processador de vídeo de verdade, e a saída pede **faixa limitada** (16–235)
+   explicitamente: JPEG é faixa cheia, e sem o pedido o conversor a mantém.
+
+4. **Abrir e negociar acontecem antes de publicar, nos dois caminhos.** O Media Foundation abre e
+   negocia na própria thread e responde por canal antes de `start` retornar, como o DirectShow já
+   fazia. E a câmera abre antes de a trilha existir: uma câmera que não entrega quadro falha no
+   botão, e a sala nunca a vê.
+
+5. **Qualquer recusa do Media Foundation cai para o DirectShow**, exceto "ocupada" e "bloqueada
+   pelo Windows". Isto amplia a decisão 5, que só caía quando a câmera não abria. Uma câmera que
+   abre e não oferece nada conversível é, na prática, o mesmo caso.
+
+6. **Quando os dois caminhos recusam, o erro traz os dois motivos.** Isto altera a outra metade
+   da decisão 5, que mostrava só o do Media Foundation. Numa máquina de usuário, o texto do aviso
+   é todo o diagnóstico que existe.
+
+### O que os testes pegaram no caminho
+
+O teste que passa AVIs de verdade pelo leitor do Media Foundation — RGB24 de baixo para cima,
+YUY2 e MJPEG, com um quadrante de cor em cada canto — pegou dois defeitos que nenhum teste de
+unidade pegaria:
+
+- **Os GUIDs de RGB são outros no Media Foundation.** `MEDIASUBTYPE_RGB24` (`e436eb7d-…`) é do
+  DirectShow; o Media Foundation usa `MFVideoFormat_RGB24` (`00000014-…`). Reconhecendo só o
+  primeiro, toda câmera RGB parecia comprimida para o caminho MF.
+- **O MJPEG saía em faixa cheia**: branco com Y=255 onde deveria ser 235. Toda webcam MJPEG
+  teria transmitido com o branco estourado e o preto esmagado.
+
+O teste roda no `just check`. Se a máquina não tem Media Foundation ou o leitor de AVI dele, ele
+avisa e pula; qualquer falha de negociação ou de leitura reprova.
+
+### O que continua sem prova
+
+Nenhuma câmera física desta máquina abre pelo Media Foundation. O caminho foi provado com
+arquivos, que passam pelo mesmo leitor, e pelo DirectShow com as câmeras reais. A prova com a
+câmera de quem relatou o defeito só vem com a versão nas mãos dele.

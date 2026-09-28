@@ -90,5 +90,5 @@ certas.
 | [0036](0036-assinar-uma-tela-e-escolha-de-quem-assiste.md) | Assinar uma tela é escolha de quem assiste | Aceito; corrigido em 2026-09-21 |
 | [0037](0037-o-bot-nao-anuncia-no-canal.md) | O bot não anuncia a transmissão no canal | Aceito |
 | [0038](0038-camera-e-uma-segunda-publicacao.md) | Câmera é uma segunda publicação, ao lado da tela | Aceito; substitui a rejeição de câmera do 0012 |
-| [0039](0039-a-camera-tem-dois-caminhos-de-captura.md) | A câmera tem dois caminhos de captura: Media Foundation e DirectShow | Aceito; altera a decisão 8 do 0038 |
+| [0039](0039-a-camera-tem-dois-caminhos-de-captura.md) | A câmera tem dois caminhos de captura: Media Foundation e DirectShow | Aceito; altera a decisão 8 do 0038; emendado em 2026-09-27 |
 | [0040](0040-novidades-vem-do-release-e-aparecem-uma-vez.md) | As novidades vêm do release no GitHub e aparecem uma vez, depois de atualizar | Aceito |
