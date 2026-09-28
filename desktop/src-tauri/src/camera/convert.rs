@@ -13,8 +13,9 @@ use livekit::webrtc::native::yuv_helper;
 use livekit::webrtc::video_frame::NV12Buffer;
 use windows::core::GUID;
 use windows::Win32::Media::MediaFoundation::{
-    MEDIASUBTYPE_I420, MEDIASUBTYPE_IYUV, MEDIASUBTYPE_NV12, MEDIASUBTYPE_RGB24,
-    MEDIASUBTYPE_RGB32, MEDIASUBTYPE_UYVY, MEDIASUBTYPE_YUY2,
+    MFVideoFormat_ARGB32, MFVideoFormat_RGB24, MFVideoFormat_RGB32, MEDIASUBTYPE_I420,
+    MEDIASUBTYPE_IYUV, MEDIASUBTYPE_NV12, MEDIASUBTYPE_RGB24, MEDIASUBTYPE_RGB32,
+    MEDIASUBTYPE_UYVY, MEDIASUBTYPE_YUY2,
 };
 
 use crate::capture::Size;
@@ -54,14 +55,24 @@ pub(crate) const PREFERENCE: [Pixels; 6] = [
 impl Pixels {
     pub(crate) fn from_subtype(subtype: &GUID) -> Option<Self> {
         // `MEDIASUBTYPE_I420` and `MEDIASUBTYPE_IYUV` are different GUIDs for
-        // the same three planes.
+        // the same three planes. The YUV subtypes are FourCC GUIDs, the same
+        // in both APIs; the **RGB ones are not**: DirectShow says
+        // `MEDIASUBTYPE_RGB24` (`e436eb7d-…`) where Media Foundation says
+        // `MFVideoFormat_RGB24` (`00000014-…`). Knowing only one of them made
+        // every RGB camera look compressed to the Media Foundation path.
         match *subtype {
             s if s == MEDIASUBTYPE_NV12 => Some(Self::Nv12),
             s if s == MEDIASUBTYPE_I420 || s == MEDIASUBTYPE_IYUV => Some(Self::I420),
             s if s == MEDIASUBTYPE_YUY2 => Some(Self::Yuy2),
             s if s == MEDIASUBTYPE_UYVY => Some(Self::Uyvy),
-            s if s == MEDIASUBTYPE_RGB32 => Some(Self::Rgb32),
-            s if s == MEDIASUBTYPE_RGB24 => Some(Self::Rgb24),
+            s if s == MEDIASUBTYPE_RGB32
+                || s == MFVideoFormat_RGB32
+                // Mesmos bytes, B, G, R, A: o alfa é ignorado.
+                || s == MFVideoFormat_ARGB32 =>
+            {
+                Some(Self::Rgb32)
+            }
+            s if s == MEDIASUBTYPE_RGB24 || s == MFVideoFormat_RGB24 => Some(Self::Rgb24),
             _ => None,
         }
     }
@@ -580,6 +591,32 @@ mod tests {
             odd,
             &mut dst
         ));
+    }
+
+    /// O defeito que o teste de arquivo do Media Foundation revelou: RGB24 de
+    /// uma fonte MF era tratado como comprimido, porque o GUID é outro.
+    #[test]
+    fn rgb_is_recognised_under_both_apis_guids() {
+        assert_eq!(
+            Pixels::from_subtype(&MEDIASUBTYPE_RGB24),
+            Some(Pixels::Rgb24)
+        );
+        assert_eq!(
+            Pixels::from_subtype(&MFVideoFormat_RGB24),
+            Some(Pixels::Rgb24)
+        );
+        assert_eq!(
+            Pixels::from_subtype(&MEDIASUBTYPE_RGB32),
+            Some(Pixels::Rgb32)
+        );
+        assert_eq!(
+            Pixels::from_subtype(&MFVideoFormat_RGB32),
+            Some(Pixels::Rgb32)
+        );
+        assert_eq!(
+            Pixels::from_subtype(&MFVideoFormat_ARGB32),
+            Some(Pixels::Rgb32)
+        );
     }
 
     #[test]

@@ -8,10 +8,15 @@
 //! **Two paths into Windows, with Media Foundation in front** (ADR-0039). MF is
 //! what current Windows keeps working: it is the API behind the camera privacy
 //! setting, the frame server that lets two applications read one device, and the
-//! source of the converters that spare us a decoder. What it is not is
-//! universal — virtual cameras (DroidCam, OBS, Iriun) show up in its
-//! enumeration and refuse to open, and those are the cameras this audience
-//! actually uses. So `dshow` exists, and `mf` is tried first.
+//! home of the decoders that spare us one. What it is not is universal —
+//! virtual cameras (DroidCam, OBS, Iriun) show up in its enumeration and refuse
+//! to open, or open and offer formats it will not convert. So `dshow` exists,
+//! `mf` is tried first, and **any** refusal from `mf` other than "busy" or "not
+//! allowed" hands the camera to `dshow`.
+//!
+//! Both paths negotiate a format the device already emits and convert it here,
+//! in `convert.rs`. Windows' own converters were the first thing this module
+//! trusted, and the first thing that failed on users' machines.
 //!
 //! The split is contained here. `list_cameras` returns **one** list with each
 //! device once, and `start` decides which path opens it. Nothing above this
@@ -21,6 +26,8 @@
 
 mod convert;
 mod dshow;
+#[cfg(test)]
+mod fixture;
 mod mf;
 
 use std::collections::HashSet;
@@ -50,12 +57,11 @@ pub enum CameraError {
     Gone,
     /// Media Foundation enumerated the device and then refused to open it.
     ///
-    /// Only ever reaches the interface when DirectShow could not pick it up
-    /// either, so the text says "não abriu" and names the code Media Foundation
-    /// gave — it is the preferred path, and its code is the one worth searching
-    /// for (ADR-0039, decision 5).
-    #[error("o Windows nao abriu esta camera por nenhum caminho (Media Foundation: {0:#010x})")]
-    NoPathOpensIt(u32),
+    /// It is the shape a DirectShow-only virtual camera makes, so it is rarely
+    /// the last word: `start` hands the camera to DirectShow next, and only a
+    /// device DirectShow does not know ends with this text on the button.
+    #[error("o Media Foundation nao abre esta camera ({0:#010x})")]
+    WillNotOpen(u32),
     #[error("outro aplicativo esta usando a camera")]
     Busy,
     #[error("o Windows nao deixa este aplicativo usar a camera")]
@@ -68,17 +74,28 @@ pub enum CameraError {
     OnlyCompressed,
     #[error("o Windows recusou a camera: {0}")]
     Platform(String),
+    /// Both paths were tried and both said no.
+    ///
+    /// Both reasons, and not only Media Foundation's: when a camera fails on
+    /// someone else's machine, the text of this error is all there is to go on,
+    /// and half of it is half the diagnosis.
+    #[error("o Windows nao abriu esta camera. Media Foundation: {media_foundation}. DirectShow: {direct_show}")]
+    BothRefused {
+        media_foundation: String,
+        direct_show: String,
+    },
 }
 
 impl CameraError {
-    /// Whether this failure is the shape that a DirectShow-only camera makes.
+    /// Whether DirectShow might succeed where Media Foundation just failed.
     ///
-    /// `Gone` counts: a virtual camera whose Media Foundation registration is
-    /// stale reports exactly that, and it is the DirectShow side that still
-    /// works. `Busy` and `NotAllowed` do not — the device answered, and trying
-    /// the other path would only turn a clear message into a vague one.
-    fn may_be_directshow_only(&self) -> bool {
-        matches!(self, Self::Gone | Self::NoPathOpensIt(_))
+    /// Almost always. A camera that will not open, that opens and offers only
+    /// formats the reader cannot convert, or whose registration is stale — all
+    /// of those are virtual cameras that DirectShow reads fine. Only `Busy` and
+    /// `NotAllowed` stay: the device answered, the other path would get the
+    /// same answer, and it would come back vaguer.
+    fn worth_another_path(&self) -> bool {
+        !matches!(self, Self::Busy | Self::NotAllowed)
     }
 }
 
@@ -275,6 +292,18 @@ impl CameraCapture {
     }
 }
 
+/// What a path hands back when it will not open the device.
+///
+/// Carries the frame sink home so the other path can still be tried: the sink
+/// owns the encoder's video source and the preview tap, and neither can be
+/// made twice for one camera.
+pub(crate) struct Refused {
+    pub(crate) error: CameraError,
+    /// `None` only when the failure took the sink with it — today, a thread
+    /// that could not be spawned. There is nothing left to try then.
+    pub(crate) frames: Option<Box<Frames>>,
+}
+
 /// Told when a capture dies on its own, with the reason in the person's words.
 ///
 /// `Arc`, and not a plain closure, because Media Foundation may hand the whole
@@ -286,15 +315,15 @@ pub(crate) type OnLost = Arc<dyn Fn(String) + Send + Sync>;
 
 /// Opens `device_id` and starts pushing frames into `sink`.
 ///
-/// Media Foundation is tried first, and a device it enumerated but will not open
-/// falls through to DirectShow without telling anyone (ADR-0039, decision 5):
-/// whoever picked a camera wants the camera, not a lecture about which Windows
-/// API reached it. When both refuse, the error reported is Media Foundation's —
-/// it is the preferred path, and its code is the one worth searching for.
+/// Media Foundation is tried first, and a device it will not serve falls through
+/// to DirectShow without telling anyone (ADR-0039, decision 5): whoever picked a
+/// camera wants the camera, not a lecture about which Windows API reached it.
+/// When both refuse, the error carries both reasons.
 ///
-/// The device is opened **before** returning, so "this camera is in use" is an
-/// error the button can show instead of a failure inside a thread nobody is
-/// watching.
+/// The device is opened **and its format negotiated** before this returns, on
+/// either path. That is what lets a camera that cannot deliver frames fail
+/// here, as an error on the button, instead of later inside a thread — which
+/// is what used to happen, after the track was already on the air.
 pub fn start(
     device_id: &str,
     ceiling: Size,
@@ -324,26 +353,30 @@ pub fn start(
             .map(|c| finish(Running::DirectShow(c)));
     }
 
-    let refused = match mf::probe(device_id) {
-        Ok(()) => {
-            return mf::start(device_id, ceiling, fps, frames, on_lost)
-                .map(|c| finish(Running::MediaFoundation(c)))
-        }
-        Err(error) if error.may_be_directshow_only() => error,
-        Err(error) => return Err(error),
+    let refused = match mf::start(device_id, ceiling, fps, frames, Arc::clone(&on_lost)) {
+        Ok(capture) => return Ok(finish(Running::MediaFoundation(capture))),
+        Err(refused) => refused,
+    };
+    let Refused { error, frames } = refused;
+    let Some(frames) = frames else {
+        return Err(error);
+    };
+    if !error.worth_another_path() {
+        return Err(error);
+    }
+    let Some(moniker) = dshow::counterpart(device_id) else {
+        return Err(error);
     };
 
-    let Some(moniker) = dshow::counterpart(device_id) else {
-        return Err(refused);
-    };
-    // O HRESULT ja saiu no log de quem recusou; repeti-lo aqui so faria a linha
-    // dizer "nao abriu por nenhum caminho" logo antes de tentar o outro.
-    eprintln!("camera: o Media Foundation recusou; tentando pelo DirectShow");
-    match dshow::start(&moniker, ceiling, fps, frames, on_lost) {
+    eprintln!("camera: o Media Foundation recusou ({error}); tentando pelo DirectShow");
+    match dshow::start(&moniker, ceiling, fps, *frames, on_lost) {
         Ok(capture) => Ok(finish(Running::DirectShow(capture))),
-        Err(error) => {
-            eprintln!("camera: o DirectShow tambem recusou: {error}");
-            Err(refused)
+        Err(other) => {
+            eprintln!("camera: o DirectShow tambem recusou: {other}");
+            Err(CameraError::BothRefused {
+                media_foundation: error.to_string(),
+                direct_show: other.to_string(),
+            })
         }
     }
 }
@@ -450,11 +483,40 @@ mod tests {
     /// Camera ocupada nao vira tentativa no outro caminho: o dispositivo
     /// respondeu, e trocar a mensagem clara por uma vaga seria piorar.
     #[test]
-    fn only_a_refusal_that_looks_like_a_virtual_camera_falls_through() {
-        assert!(CameraError::Gone.may_be_directshow_only());
-        assert!(CameraError::NoPathOpensIt(0x8007_0057).may_be_directshow_only());
-        assert!(!CameraError::Busy.may_be_directshow_only());
-        assert!(!CameraError::NotAllowed.may_be_directshow_only());
+    fn busy_and_blocked_do_not_fall_through() {
+        assert!(!CameraError::Busy.worth_another_path());
+        assert!(!CameraError::NotAllowed.worth_another_path());
+    }
+
+    /// O defeito relatado: a camera abria pelo Media Foundation, o formato nao
+    /// convertia, e o DirectShow nunca era tentado. Toda recusa que nao seja
+    /// "ocupada" ou "bloqueada" tem que cair para o outro caminho.
+    #[test]
+    fn a_camera_that_opens_but_will_not_convert_falls_through() {
+        let reported = CameraError::Platform(
+            "pedindo NV12 a camera: Nenhuma transformacao adequada foi encontrada (0xC00D5212)"
+                .into(),
+        );
+        assert!(reported.worth_another_path());
+        assert!(CameraError::NoUsableFormat.worth_another_path());
+        assert!(CameraError::OnlyCompressed.worth_another_path());
+        assert!(CameraError::Gone.worth_another_path());
+        assert!(CameraError::WillNotOpen(0x8007_0057).worth_another_path());
+    }
+
+    /// Quando os dois caminhos recusam, o texto que chega ao usuario e o unico
+    /// diagnostico que existe. Ele precisa carregar as duas metades.
+    #[test]
+    fn a_double_refusal_names_both_reasons() {
+        let text = CameraError::BothRefused {
+            media_foundation: "motivo um".into(),
+            direct_show: "motivo dois".into(),
+        }
+        .to_string();
+        assert!(
+            text.contains("motivo um") && text.contains("motivo dois"),
+            "{text}"
+        );
     }
 
     /// Diagnostico: que caminho abre cada camera desta maquina.
