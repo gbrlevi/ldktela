@@ -813,3 +813,12 @@ autoridade (`docs/adr/` > `docs/SRS-v2.0-*.md` > `docs/websocket.md` >
   (`"version": "../package.json"`) e é dele que saem o `.msi` e o `latest.json`; o `version` do
   `Cargo.toml` do core ficou em `0.0.0` porque nada o lê. Para subir a
   versão: `npm version X.Y.Z --no-git-tag-version` em `desktop/`, que atualiza o lockfile junto.
+
+- **[S10] Ctrl+Shift+E virou um alternador, não só um freio de emergência.** Com nada no ar, o
+  mesmo atalho agora começa a compartilhar — tela 1 inteira, com áudio — em vez de não fazer nada.
+  O core continua emitindo o mesmo `share://stop-requested` de sempre, sem saber se vai parar ou
+  começar; quem decide é o `onStopRequested` do `runtime.ts`, olhando `useMediaStore`. "Tela 1" sai
+  de graça: `capture.rs` já lista as telas antes das janelas e rotula a primeira assim, então
+  bastou pegar a primeira fonte do tipo `screen` (`media/hotkey.ts`, testado à parte por não
+  precisar do Tauri para isso). Alternativa descartada: um segundo atalho só para começar — mais
+  uma tecla para lembrar por um caso que o mesmo Ctrl+Shift+E já cobre olhando o estado atual.

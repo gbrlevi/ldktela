@@ -117,10 +117,14 @@ export function onShareEnded(handler: (ended: ShareEnded) => void): Promise<() =
 }
 
 /**
- * The tray item and the global hotkey (Ctrl+Shift+E) ask; this side decides.
+ * The tray item and the global hotkey (Ctrl+Shift+E) ask; this side decides —
+ * including deciding that "ask" now means *start*, when nothing is on air. The
+ * core keeps emitting the same event either way; the toggle lives entirely in
+ * the handler this registers for.
  *
- * The core never stops a share on its own here because only this side knows
- * whether there is one, and it is this side that has to tell the server.
+ * The core never stops (or starts) a share on its own here because only this
+ * side knows whether there is one, and it is this side that has to tell the
+ * server.
  */
 export function onStopRequested(handler: () => void): Promise<() => void> {
   return listen('share://stop-requested', () => {

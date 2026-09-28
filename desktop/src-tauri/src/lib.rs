@@ -31,15 +31,20 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 /// de apagar o token do cofre.
 const SIGN_OUT_EVENT: &str = "session://sign-out";
 
-/// Pedido de parada, vindo da bandeja ou do atalho global.
+/// Pedido de parada — ou de inicio, se nada estiver no ar — vindo da bandeja ou
+/// do atalho global.
 ///
-/// Quem para de verdade e o TypeScript: ele e que sabe se ha compartilhamento em
-/// andamento e precisa atualizar a sala junto. Aqui so se pede.
+/// Quem decide de verdade e o TypeScript: ele e que sabe se ha compartilhamento
+/// em andamento e precisa atualizar a sala junto. Aqui so se pede, sempre com o
+/// mesmo evento; o nome ficou do tempo em que so parava, mas o toggle inteiro
+/// vive do outro lado.
 const STOP_EVENT: &str = "share://stop-requested";
 
-/// O atalho de panico. Existe porque o aplicativo vive na bandeja e a janela
-/// fica escondida: descobrir que a tela errada esta no ar e precisar caçar a
-/// janela para parar e tempo demais para esse tipo de erro.
+/// O atalho de panico — e agora tambem o de comecar rapido. Existe porque o
+/// aplicativo vive na bandeja e a janela fica escondida: descobrir que a tela
+/// errada esta no ar e precisar caçar a janela para parar e tempo demais para
+/// esse tipo de erro, e o mesmo vale ao contrario, para quem quer ir ao ar sem
+/// abrir o seletor.
 fn stop_hotkey() -> Shortcut {
     Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), Code::KeyE)
 }
@@ -124,7 +129,7 @@ pub fn run() -> tauri::Result<()> {
                     // So na descida: sem o filtro, soltar a tecla dispararia um
                     // segundo pedido de parada.
                     if event.state() == ShortcutState::Pressed && shortcut == &watched {
-                        eprintln!("atalho: parada pedida pelo teclado");
+                        eprintln!("atalho: Ctrl+Shift+E pedido pelo teclado");
                         let _ = app.emit(STOP_EVENT, ());
                     }
                 })

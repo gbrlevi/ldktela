@@ -13,6 +13,7 @@ import type { PublicationSource } from '../media/publication';
 import { notifyShareStarted, shouldNotify } from '../platform/notify';
 import { GatewayClient } from '../gateway/client';
 import { describeError, log } from '../log';
+import { defaultShareChoice } from '../media/hotkey';
 import { MediaSession } from '../media/session';
 import { startPreviewBridge } from '../media/preview';
 import { onStopRequested } from '../media/native';
@@ -29,6 +30,7 @@ import { clearRefreshToken, readRefreshToken, writeRefreshToken } from '../platf
 import { shouldSilenceOtherScreens, useMediaStore } from '../store/media';
 import { useRoomStore } from '../store/room';
 import { useSessionStore } from '../store/session';
+import { useUiStore } from '../store/ui';
 import { useUpdaterStore } from '../store/updater';
 
 /** Same wording for a wrong code and an expired one: the server does not tell them apart. */
@@ -109,24 +111,30 @@ export async function start(): Promise<void> {
   // quadros entra e sai; a assinatura não.
   startPreviewBridge();
 
-  // A bandeja e o atalho global (Ctrl+Shift+E) pedem a parada; quem sabe se há
-  // algo para parar é este lado. Vale com a janela escondida, que é o estado
-  // normal do aplicativo (RF-26) e justamente quando descobrir a tela errada no
-  // ar é mais caro.
+  // A bandeja e o atalho global (Ctrl+Shift+E) pedem; quem sabe se há algo para
+  // parar é este lado, e é aqui que o atalho vira um botão de ligar/desligar em
+  // vez de só parar. Vale com a janela escondida, que é o estado normal do
+  // aplicativo (RF-26) e justamente quando descobrir a tela errada no ar é mais
+  // caro.
   void onStopRequested(() => {
     const state = useMediaStore.getState();
     // Para as duas fontes (ADR-0038): quem usa o atalho para tirar a própria
     // imagem do ar não espera que a câmera continue transmitindo.
-    if (!state.publishing && !state.camera.publishing) {
+    if (state.publishing || state.camera.publishing) {
+      log.info('transmissão: parada pedida de fora da janela');
+      if (state.publishing) {
+        void media.stopShare();
+      }
+      if (state.camera.publishing) {
+        void media.stopCamera();
+      }
       return;
     }
-    log.info('transmissão: parada pedida de fora da janela');
-    if (state.publishing) {
-      void media.stopShare();
-    }
-    if (state.camera.publishing) {
-      void media.stopCamera();
-    }
+    // Nada no ar: o mesmo atalho começa, em vez de não fazer nada. Tela 1
+    // inteira e com áudio, porque é o caso comum e o atalho existe para não
+    // abrir o seletor.
+    log.info('transmissão: início pedido de fora da janela');
+    void startDefaultShare();
   });
 
   scheduleUpdateChecks();
@@ -243,6 +251,27 @@ function scheduleUpdateChecks(): void {
   };
   setTimeout(run, UPDATE_CHECK_DELAY_MS);
   setInterval(run, UPDATE_CHECK_INTERVAL_MS);
+}
+
+/**
+ * O que o atalho global faz quando aperta a tecla e nada está no ar: começa a
+ * compartilhar a tela 1 inteira, com áudio, sem passar pelo seletor.
+ *
+ * `startShare` já recusa em silêncio fora de um canal de voz — não há sala
+ * para pedir token — e é esse o comportamento certo aqui também: apertar o
+ * atalho sem estar em nenhuma chamada não deveria abrir nada.
+ */
+async function startDefaultShare(): Promise<void> {
+  const sources = await media.listSources().catch((error: unknown) => {
+    log.error('atalho: não consegui listar as fontes', error);
+    return [];
+  });
+  const choice = defaultShareChoice(sources);
+  if (choice === null) {
+    useUiStore.getState().toast('danger', 'Não encontrei nenhuma tela para compartilhar.');
+    return;
+  }
+  await media.startShare(choice, useMediaStore.getState().publishPreset);
 }
 
 /**
