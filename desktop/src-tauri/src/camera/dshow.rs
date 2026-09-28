@@ -51,7 +51,7 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Variant::VariantClear;
 
-use super::convert::{Converter, Pixels, PREFERENCE};
+use super::convert::{Converter, Pixels, Raw, PREFERENCE};
 use super::{choose_format, CameraError, Format, Frames, OnLost};
 use crate::capture::Size;
 
@@ -224,6 +224,10 @@ pub(super) fn counterpart(mf_id: &str) -> Option<String> {
 struct Shape {
     kind: Pixels,
     size: Size,
+    /// The first row in memory is the bottom of the picture. RGB only, and only
+    /// when the height is positive: that is the bitmap convention, and a
+    /// negative height is how a device says "top-down" instead.
+    bottom_up: bool,
     subtype: GUID,
     /// The `VIDEOINFOHEADER` exactly as the device gave it, kept so
     /// `ConnectionMediaType` can answer with the truth rather than a rebuild.
@@ -242,9 +246,10 @@ unsafe fn shape_of(pmt: *const AM_MEDIA_TYPE) -> Option<Shape> {
     let kind = Pixels::from_subtype(&media.subtype)?;
     let header = unsafe { &*media.pbFormat.cast::<VIDEOINFOHEADER>() };
     let width = header.bmiHeader.biWidth;
-    // Altura negativa é a forma de o bitmap dizer "de cima para baixo"; o
-    // sentido já está decidido pelo formato, então aqui só o tamanho importa.
+    // Altura negativa é a forma de o bitmap dizer "de cima para baixo". Vale
+    // para RGB; YUV é de cima para baixo sempre, qualquer que seja o sinal.
     let height = header.bmiHeader.biHeight.abs();
+    let bottom_up = matches!(kind, Pixels::Rgb32 | Pixels::Rgb24) && header.bmiHeader.biHeight > 0;
     if width < 2 || height < 2 || width % 2 != 0 || height % 2 != 0 {
         return None;
     }
@@ -254,6 +259,7 @@ unsafe fn shape_of(pmt: *const AM_MEDIA_TYPE) -> Option<Shape> {
             width: width as u32,
             height: height as u32,
         },
+        bottom_up,
         subtype: media.subtype,
         format: unsafe {
             std::slice::from_raw_parts(media.pbFormat, media.cbFormat as usize).to_vec()
@@ -916,10 +922,12 @@ impl SinkPin_Impl {
         let size = shape.size;
         // A amostra é emprestada pelo tempo desta chamada, então a conversão
         // acontece aqui dentro e nada do DirectShow escapa deste escopo.
-        let bytes = unsafe { std::slice::from_raw_parts(data, needed) };
-        frames.deliver(size, |destination| {
-            converter.write(bytes, size, destination)
-        });
+        let raw = Raw {
+            data: unsafe { std::slice::from_raw_parts(data, needed) },
+            pitch: shape.kind.stride(size.width),
+            bottom_up: shape.bottom_up,
+        };
+        frames.deliver(size, |destination| converter.write(raw, size, destination));
         Ok(())
     }
 

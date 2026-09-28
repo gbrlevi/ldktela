@@ -80,25 +80,60 @@ impl Pixels {
         }
     }
 
-    /// Bytes in one whole frame.
+    /// Bytes in one whole frame, laid out the DirectShow way (see `stride`).
     pub(crate) fn frame_bytes(self, size: Size) -> usize {
-        let rows = size.height as usize;
-        let stride = self.stride(size.width);
+        self.needed(self.stride(size.width), size.height)
+    }
+
+    /// Bytes one frame occupies with rows `pitch` apart.
+    ///
+    /// Planar layouts put the chroma after the luma at the same pitch (NV12) or
+    /// at half of it (I420), which is how both Windows APIs hand them over.
+    pub(crate) fn needed(self, pitch: usize, height: u32) -> usize {
+        let rows = height as usize;
         match self {
-            // Luma plus half a plane of chroma.
-            Self::Nv12 | Self::I420 => stride * rows + stride * rows.div_ceil(2),
-            _ => stride * rows,
+            Self::Nv12 => pitch * rows + pitch * rows.div_ceil(2),
+            Self::I420 => pitch * rows + 2 * (pitch / 2) * rows.div_ceil(2),
+            _ => pitch * rows,
         }
     }
 
-    /// Whether row 0 of the buffer is the **bottom** of the picture.
+    /// Whether this layout can be stored bottom-up.
     ///
-    /// The RGB formats are stored bottom-up in a `VIDEOINFOHEADER` with positive
-    /// height, which is the Windows bitmap convention and the single easiest way
-    /// to ship a camera that shows everyone upside down.
-    fn bottom_up(self) -> bool {
-        matches!(self, Self::Rgb32 | Self::Rgb24)
+    /// Everything packed can. The planar ones cannot: a bottom-up NV12 would
+    /// need the chroma plane flipped too, and neither Windows API produces one.
+    fn can_be_bottom_up(self) -> bool {
+        !matches!(self, Self::Nv12 | Self::I420)
     }
+
+    /// The narrowest row this layout allows for `width` pixels.
+    fn minimum_pitch(self, width: u32) -> usize {
+        let width = width as usize;
+        match self {
+            Self::Nv12 | Self::I420 => width,
+            Self::Yuy2 | Self::Uyvy => width * 2,
+            Self::Rgb32 => width * 4,
+            Self::Rgb24 => width * 3,
+        }
+    }
+}
+
+/// One frame as it sits in memory.
+///
+/// The layout is spelled out instead of being implied by the pixel format,
+/// because the two capture paths disagree about it. DirectShow packs rows the
+/// bitmap way and stores RGB bottom-up unless the height says otherwise; Media
+/// Foundation hands out whatever pitch the driver allocated, and says which way
+/// up in the sign of it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Raw<'a> {
+    /// Starts at the row that is **first in memory**, whichever way up that is.
+    pub(crate) data: &'a [u8],
+    /// Bytes from one row to the next in memory. Never negative here: whoever
+    /// reads the buffer turns a negative stride into `bottom_up`.
+    pub(crate) pitch: usize,
+    /// The first row in memory is the **bottom** of the picture.
+    pub(crate) bottom_up: bool,
 }
 
 /// Converts frames of one layout, reusing its scratch between them.
@@ -121,21 +156,26 @@ impl Converter {
         self.kind
     }
 
-    /// Writes one frame of `src` into `dst`, returning false if `src` is short.
+    /// Writes one frame into `dst`, returning false if it cannot be read.
     ///
     /// Refusing is the right answer to a short buffer: a camera that hands over
     /// half a frame is a camera we skip for one frame, not a reason to read past
-    /// the end of it.
-    pub(crate) fn write(&mut self, src: &[u8], size: Size, dst: &mut NV12Buffer) -> bool {
+    /// the end of it. The same goes for a layout that contradicts itself, like a
+    /// bottom-up NV12.
+    pub(crate) fn write(&mut self, raw: Raw<'_>, size: Size, dst: &mut NV12Buffer) -> bool {
         let (width, height) = (size.width, size.height);
         if width < 2 || height < 2 || width % 2 != 0 || height % 2 != 0 {
             return false;
         }
-        if src.len() < self.kind.frame_bytes(size) {
+        if raw.bottom_up && !self.kind.can_be_bottom_up() {
+            return false;
+        }
+        if raw.pitch < self.kind.minimum_pitch(width)
+            || raw.data.len() < self.kind.needed(raw.pitch, height)
+        {
             return false;
         }
 
-        let stride = self.kind.stride(width);
         let (stride_y, stride_uv) = dst.strides();
         let rows = height as usize;
         {
@@ -147,20 +187,22 @@ impl Converter {
             }
         }
 
-        // libyuv reads a bottom-up source when the height is negative, and always
-        // writes the destination top-down.
-        let signed_height = if self.kind.bottom_up() {
+        // libyuv lê uma origem de baixo para cima quando a altura é negativa, e
+        // sempre escreve o destino de cima para baixo.
+        let signed_height = if raw.bottom_up {
             -(height as i32)
         } else {
             height as i32
         };
+        let pitch = raw.pitch;
+        let src = raw.data;
 
         match self.kind {
             Pixels::Nv12 => {
                 let (dst_y, dst_uv) = dst.data_mut();
                 nv12_into(
                     src,
-                    stride,
+                    pitch,
                     size,
                     dst_y,
                     stride_y as usize,
@@ -169,20 +211,20 @@ impl Converter {
                 )
             }
             Pixels::I420 => {
-                let luma = stride * rows;
-                let chroma_stride = stride / 2;
-                let chroma = chroma_stride * (rows / 2);
+                let chroma_pitch = pitch / 2;
+                let luma = pitch * rows;
+                let chroma = chroma_pitch * rows.div_ceil(2);
                 let (y, rest) = src.split_at(luma);
                 let (u, rest) = rest.split_at(chroma);
                 let v = &rest[..chroma];
                 let (dst_y, dst_uv) = dst.data_mut();
                 yuv_helper::i420_to_nv12(
                     y,
-                    stride as u32,
+                    pitch as u32,
                     u,
-                    chroma_stride as u32,
+                    chroma_pitch as u32,
                     v,
-                    chroma_stride as u32,
+                    chroma_pitch as u32,
                     dst_y,
                     stride_y,
                     dst_uv,
@@ -195,16 +237,15 @@ impl Converter {
             Pixels::Yuy2 | Pixels::Uyvy => {
                 // YUY2 is `Y0 U Y1 V` per pixel pair; UYVY is the same four bytes
                 // rotated by one.
-                let (luma_at, u_at, v_at) = match self.kind {
+                let offsets = match self.kind {
                     Pixels::Yuy2 => (0usize, 1usize, 3usize),
                     _ => (1usize, 0usize, 2usize),
                 };
                 let (dst_y, dst_uv) = dst.data_mut();
                 packed_422_into(
-                    src,
-                    stride,
+                    raw,
                     size,
-                    (luma_at, u_at, v_at),
+                    offsets,
                     dst_y,
                     stride_y as usize,
                     dst_uv,
@@ -216,8 +257,8 @@ impl Converter {
                 // libyuv's "ARGB" is B, G, R, A in memory, which is exactly what
                 // Windows calls RGB32.
                 yuv_helper::argb_to_nv12(
-                    &src[..stride * rows],
-                    stride as u32,
+                    &src[..pitch * rows],
+                    pitch as u32,
                     dst_y,
                     stride_y,
                     dst_uv,
@@ -228,11 +269,13 @@ impl Converter {
                 true
             }
             Pixels::Rgb24 => {
-                let widened = stride_for_rgb32(width);
+                // Alargada linha a linha na ordem da memória, sem virar nada: a
+                // altura negativa logo abaixo faz a virada, uma vez só.
+                let widened = width as usize * 4;
                 self.scratch.resize(widened * rows, 0);
                 for row in 0..rows {
-                    let from = &src[row * stride..row * stride + width as usize * 3];
-                    let into = &mut self.scratch[row * widened..row * widened + width as usize * 4];
+                    let from = &src[row * pitch..row * pitch + width as usize * 3];
+                    let into = &mut self.scratch[row * widened..(row + 1) * widened];
                     let (pixels, _) = into.as_chunks_mut::<4>();
                     let (triples, _) = from.as_chunks::<3>();
                     for (pixel, bgr) in pixels.iter_mut().zip(triples) {
@@ -257,10 +300,6 @@ impl Converter {
             }
         }
     }
-}
-
-fn stride_for_rgb32(width: u32) -> usize {
-    width as usize * 4
 }
 
 /// Row-by-row copy of an NV12 frame with `pitch` into libwebrtc's buffer.
@@ -306,13 +345,12 @@ pub(crate) fn nv12_into(
 /// Packed 4:2:2 (YUY2, UYVY) into NV12.
 ///
 /// `offsets` says where luma, U and V sit inside each four-byte pixel pair.
-/// Chroma is taken from the even rows and the odd ones are dropped, rather than
-/// averaged: the picture is about to be scaled and encoded, and the difference
-/// does not survive either.
+/// Chroma is taken from the even rows of the **picture** and the odd ones are
+/// dropped, rather than averaged: the picture is about to be scaled and
+/// encoded, and the difference does not survive either.
 #[allow(clippy::too_many_arguments)]
 fn packed_422_into(
-    source: &[u8],
-    pitch: usize,
+    raw: Raw<'_>,
     size: Size,
     offsets: (usize, usize, usize),
     dst_y: &mut [u8],
@@ -323,7 +361,8 @@ fn packed_422_into(
     let rows = size.height as usize;
     let width = size.width as usize;
     let (luma_at, u_at, v_at) = offsets;
-    if pitch < width * 2 || source.len() < pitch * rows {
+    let pitch = raw.pitch;
+    if pitch < width * 2 || raw.data.len() < pitch * rows {
         return false;
     }
     if stride_y < width || stride_uv < width {
@@ -331,7 +370,9 @@ fn packed_422_into(
     }
 
     for row in 0..rows {
-        let from = &source[row * pitch..row * pitch + width * 2];
+        // A linha `row` da imagem, esteja ela onde estiver na memória.
+        let stored = if raw.bottom_up { rows - 1 - row } else { row };
+        let from = &raw.data[stored * pitch..stored * pitch + width * 2];
         let into = &mut dst_y[row * stride_y..row * stride_y + width];
         for (pixel, byte) in into.iter_mut().enumerate() {
             *byte = from[pixel * 2 + luma_at];
@@ -360,6 +401,15 @@ mod tests {
 
     fn buffer() -> NV12Buffer {
         NV12Buffer::new(TINY.width, TINY.height)
+    }
+
+    /// Linhas coladas, de cima para baixo.
+    fn packed(kind: Pixels, data: &[u8]) -> Raw<'_> {
+        Raw {
+            data,
+            pitch: kind.stride(TINY.width),
+            bottom_up: false,
+        }
     }
 
     /// Um pitch maior que a largura é o caso comum, não a exceção: tratá-lo como
@@ -425,7 +475,7 @@ mod tests {
             20, 150, 21, 250, 22, 151, 23, 251, // linha 1
         ];
         let mut dst = buffer();
-        assert!(Converter::new(Pixels::Yuy2).write(&source, TINY, &mut dst));
+        assert!(Converter::new(Pixels::Yuy2).write(packed(Pixels::Yuy2, &source), TINY, &mut dst));
 
         let (stride_y, _) = dst.strides();
         let (y, uv) = dst.data_mut();
@@ -448,7 +498,7 @@ mod tests {
             150, 20, 250, 21, 151, 22, 251, 23, // linha 1
         ];
         let mut dst = buffer();
-        assert!(Converter::new(Pixels::Uyvy).write(&source, TINY, &mut dst));
+        assert!(Converter::new(Pixels::Uyvy).write(packed(Pixels::Uyvy, &source), TINY, &mut dst));
 
         let (y, uv) = dst.data_mut();
         assert_eq!(&y[0..4], &[10, 11, 12, 13]);
@@ -465,7 +515,11 @@ mod tests {
             .flatten()
             .collect();
         let mut dst = buffer();
-        assert!(Converter::new(Pixels::Rgb32).write(&source, TINY, &mut dst));
+        assert!(Converter::new(Pixels::Rgb32).write(
+            packed(Pixels::Rgb32, &source),
+            TINY,
+            &mut dst
+        ));
 
         let (y, uv) = dst.data_mut();
         // Vermelho BT.601: Y≈81, U≈90, V≈240. Margem larga de propósito: o que
@@ -501,7 +555,11 @@ mod tests {
             }
         }
         let mut dst = buffer();
-        assert!(Converter::new(Pixels::Rgb24).write(&source, TINY, &mut dst));
+        assert!(Converter::new(Pixels::Rgb24).write(
+            packed(Pixels::Rgb24, &source),
+            TINY,
+            &mut dst
+        ));
         let (y, _) = dst.data_mut();
         assert!((70..95).contains(&y[0]));
     }
@@ -513,7 +571,15 @@ mod tests {
             height: 3,
         };
         let mut dst = NV12Buffer::new(6, 4);
-        assert!(!Converter::new(Pixels::Yuy2).write(&[0u8; 256], odd, &mut dst));
+        assert!(!Converter::new(Pixels::Yuy2).write(
+            Raw {
+                data: &[0u8; 256],
+                pitch: 10,
+                bottom_up: false,
+            },
+            odd,
+            &mut dst
+        ));
     }
 
     #[test]
@@ -536,5 +602,123 @@ mod tests {
         assert_eq!(Pixels::Nv12.frame_bytes(size), 1280 * 720 * 3 / 2);
         assert_eq!(Pixels::Yuy2.frame_bytes(size), 1280 * 720 * 2);
         assert_eq!(Pixels::Rgb32.frame_bytes(size), 1280 * 720 * 4);
+    }
+    /// O mesmo quadro de duas linhas, vermelho em cima e azul embaixo, guardado
+    /// de baixo para cima: a primeira linha na memória é a azul.
+    fn red_over_blue_bottom_up(kind: Pixels) -> Vec<u8> {
+        let bytes = if kind == Pixels::Rgb32 { 4 } else { 3 };
+        let pitch = kind.stride(TINY.width);
+        let mut data = vec![0u8; pitch * 2];
+        for column in 0..TINY.width as usize {
+            // Linha 0 da memória: a de baixo, azul (B, G, R).
+            data[column * bytes] = 255;
+            // Linha 1 da memória: a de cima, vermelha.
+            data[pitch + column * bytes + 2] = 255;
+        }
+        data
+    }
+
+    /// Uma câmera de cabeça para baixo é o defeito mais visível que este
+    /// arquivo pode causar, e nenhum teste de cor uniforme o pega.
+    #[test]
+    fn a_bottom_up_rgb_frame_comes_out_the_right_way_up() {
+        for kind in [Pixels::Rgb32, Pixels::Rgb24] {
+            let data = red_over_blue_bottom_up(kind);
+            let mut dst = buffer();
+            let raw = Raw {
+                data: &data,
+                pitch: kind.stride(TINY.width),
+                bottom_up: true,
+            };
+            assert!(Converter::new(kind).write(raw, TINY, &mut dst), "{kind:?}");
+
+            let (stride_y, _) = dst.strides();
+            let (y, _) = dst.data_mut();
+            let top = y[0];
+            let bottom = y[stride_y as usize];
+            // Vermelho BT.601 tem Y≈81; azul, Y≈41.
+            assert!(
+                (70..95).contains(&top),
+                "{kind:?}: topo devia ser vermelho, Y={top}"
+            );
+            assert!(
+                (30..55).contains(&bottom),
+                "{kind:?}: base devia ser azul, Y={bottom}"
+            );
+        }
+    }
+
+    /// O Media Foundation entrega o passo que o driver alocou. Tratar YUY2 como
+    /// linhas coladas deslocaria cada linha pelo excesso.
+    #[test]
+    fn packed_yuv_honours_a_pitch_wider_than_the_row() {
+        let pitch = 12; // 8 bytes de imagem e 4 de sobra por linha
+        let source: Vec<u8> = vec![
+            10, 100, 11, 200, 12, 101, 13, 201, 0, 0, 0, 0, // linha 0
+            20, 150, 21, 250, 22, 151, 23, 251, 0, 0, 0, 0, // linha 1
+        ];
+        let mut dst = buffer();
+        let raw = Raw {
+            data: &source,
+            pitch,
+            bottom_up: false,
+        };
+        assert!(Converter::new(Pixels::Yuy2).write(raw, TINY, &mut dst));
+        let (stride_y, _) = dst.strides();
+        let (y, _) = dst.data_mut();
+        assert_eq!(
+            &y[stride_y as usize..stride_y as usize + 4],
+            &[20, 21, 22, 23]
+        );
+    }
+
+    #[test]
+    fn packed_yuv_can_be_read_bottom_up() {
+        let source: Vec<u8> = vec![
+            20, 150, 21, 250, 22, 151, 23, 251, // linha de baixo, primeira na memória
+            10, 100, 11, 200, 12, 101, 13, 201, // linha de cima
+        ];
+        let mut dst = buffer();
+        let raw = Raw {
+            data: &source,
+            pitch: 8,
+            bottom_up: true,
+        };
+        assert!(Converter::new(Pixels::Yuy2).write(raw, TINY, &mut dst));
+        let (y, uv) = dst.data_mut();
+        assert_eq!(&y[0..4], &[10, 11, 12, 13], "a linha de cima vem primeiro");
+        assert_eq!(&uv[0..4], &[100, 200, 101, 201], "croma da linha de cima");
+    }
+
+    /// Nenhuma das duas APIs produz NV12 de cabeça para baixo; um quadro que
+    /// diz ser um se contradiz, e é recusado em vez de adivinhado.
+    #[test]
+    fn a_bottom_up_planar_frame_is_refused() {
+        let data = vec![0u8; Pixels::Nv12.frame_bytes(TINY)];
+        let mut dst = buffer();
+        let raw = Raw {
+            data: &data,
+            pitch: 4,
+            bottom_up: true,
+        };
+        assert!(!Converter::new(Pixels::Nv12).write(raw, TINY, &mut dst));
+    }
+
+    #[test]
+    fn a_pitch_narrower_than_the_row_is_refused() {
+        let data = vec![0u8; 64];
+        let mut dst = buffer();
+        let raw = Raw {
+            data: &data,
+            pitch: 6, // YUY2 de 4 px precisa de 8
+            bottom_up: false,
+        };
+        assert!(!Converter::new(Pixels::Yuy2).write(raw, TINY, &mut dst));
+    }
+
+    #[test]
+    fn i420_needs_both_half_pitch_chroma_planes() {
+        assert_eq!(Pixels::I420.needed(8, 4), 8 * 4 + 2 * 4 * 2);
+        assert_eq!(Pixels::Nv12.needed(8, 4), 8 * 4 + 8 * 2);
     }
 }
